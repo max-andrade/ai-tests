@@ -1,9 +1,10 @@
 
 import { CryptoPriceResponse, EquityPriceResponse, EquityErrorResponse } from '../types';
+import secrets from '../secrets.json';
 
 const COINGECKO_API_BASE = 'https://api.coingecko.com/api/v3/simple/price';
 const TWELVEDATA_API_BASE = 'https://api.twelvedata.com';
-const TWELVEDATA_API_KEY = '9778d9520fca4c86836407d3d52969f7'; // As provided
+const TWELVEDATA_API_KEY = secrets.TWELVEDATA_API_KEY; // As provided
 
 /**
  * Fetches current prices for given cryptocurrency IDs from CoinGecko.
