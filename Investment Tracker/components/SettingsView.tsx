@@ -12,7 +12,7 @@ interface SettingsViewProps { // Renamed from AdminViewProps
   onUpdateAsset: (id: string, assetData: Omit<ManagedAsset, 'id'>) => void;
   onCancelEdit: () => void;
   onExportData: () => void;
-  importFileRef: React.RefObject<HTMLInputElement>;
+  importFileRef: React.RefObject<HTMLInputElement | null> ;
   onImportData: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onRestoreFromServer: () => void;
   onBackupToServer: () => void;

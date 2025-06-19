@@ -1,0 +1,83 @@
+<policies>
+    <inbound>
+        <base />
+        <cors>
+            <allowed-origins>
+                <origin>*</origin>
+            </allowed-origins>
+            <allowed-methods>
+                <method>*</method>
+            </allowed-methods>
+            <allowed-headers>
+                <header>*</header>
+            </allowed-headers>
+            <expose-headers>
+                <header>*</header>
+            </expose-headers>
+        </cors>
+        <!-- Parse query parameters for crypto and equity symbols -->
+        <set-variable name="cryptoTokens" value="@(context.Request.OriginalUrl.Query.GetValueOrDefault("crypto", ""))" />
+        <set-variable name="equitySymbols" value="@(context.Request.OriginalUrl.Query.GetValueOrDefault("equities", ""))" />
+        <!-- Compose cache key based on parameters -->
+        <set-variable name="cacheKey" value="@(string.Concat("consolidated-prices-", context.Variables["cryptoTokens"], "-", context.Variables["equitySymbols"]))" />
+        <!-- Try to get cached response -->
+        <cache-lookup-value key="@((string)context.Variables["cacheKey"])" variable-name="cachedResponse" />
+        <choose>
+            <when condition="@(context.Variables.GetValueOrDefault("cachedResponse") != null)">
+                <return-response>
+                    <set-status code="200" reason="OK" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@((string)context.Variables["cachedResponse"])</set-body>
+                </return-response>
+            </when>
+            <otherwise>
+                <!-- Fetch crypto prices from CoinGecko -->
+                <send-request mode="new" response-variable-name="cryptoResponse" timeout="20" ignore-error="false">
+                    <set-url>@("https://api.coingecko.com/api/v3/simple/price?ids=" + (string)context.Variables["cryptoTokens"] + "&amp;vs_currencies=aud")</set-url>
+                    <set-method>GET</set-method>
+                </send-request>
+                <!-- Fetch equity prices from TwelveData -->
+                <send-request mode="new" response-variable-name="equityResponse" timeout="20" ignore-error="false">
+                    <set-url>@("https://api.twelvedata.com/price?symbol=" + (string)context.Variables["equitySymbols"] + "&amp;apikey={{TWELVEDATA-API-KEY}}")</set-url>
+                    <set-method>GET</set-method>
+                </send-request>
+                <!-- Fetch USD to AUD exchange rate -->
+                <send-request mode="new" response-variable-name="exchangeRateResponse" timeout="20" ignore-error="false">
+                    <set-url>https://open.er-api.com/v6/latest/USD</set-url>
+                    <set-method>GET</set-method>
+                </send-request>
+                <set-variable name="result" value="@{
+    var crypto = ((IResponse)context.Variables["cryptoResponse"]).Body.As<JObject>();
+    var equity = ((IResponse)context.Variables["equityResponse"]).Body.As<JObject>();
+    var exchange = ((IResponse)context.Variables["exchangeRateResponse"]).Body.As<JObject>();
+    var audRate = exchange["rates"]?["AUD"] ?? null;
+    return new JObject {
+        ["cryptoPricesAUD"] = crypto,
+        ["equityPricesUSD"] = equity,
+        ["usdToAudRate"] = audRate
+    }.ToString();
+}" />
+                <!-- Store in cache for 30 minutes -->
+                <cache-store-value key="@((string)context.Variables["cacheKey"])" duration="1800" value="@((string)context.Variables["result"])" />
+                <return-response>
+                    <set-status code="200" reason="OK" />
+                    <set-header name="content-type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@((string)context.Variables["result"])</set-body>
+                </return-response>
+            </otherwise>
+        </choose>
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

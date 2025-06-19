@@ -1,15 +1,12 @@
-
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
     Investment, InvestmentType, ManagedAsset, AppData, UserPreferences,
-    EquityPriceResponse, EquityPriceMap, EquitySingleSymbolResponse, EquityErrorResponse,
     AssetGroupSortConfig, AssetGroupSortKey, SortDirection,
     WithdrawFormData, AutoRefreshConfig, FinancialYear, ALL_TIME_FY, ToastConfig,
     LOCAL_STORAGE_KEYS as APP_LOCAL_STORAGE_KEYS,
     InvestmentFormSubmitData, 
     SummaryStatsData,
     AppView,
-    CryptoPriceResponse,
     CachedApiData,
     CategorizedSummaryStats // Added import
 } from './types';
@@ -25,9 +22,8 @@ import WithdrawForm from './components/WithdrawForm';
 import Toast from './components/Toast';
 import AppFooter from './components/AppFooter';
 
-import { fetchCryptoPrices, fetchEquityPrices } from './services/apiService';
+import { fetchConsolidatedPrices } from './services/apiService';
 import { uploadDataToAzure, downloadDataFromAzure } from './services/azureBlobStorageService';
-import { getUsdToAudRate } from './services/exchangeRateService'; // Service modified
 import {
     getCurrentDateTimeLocalString,
 } from './dateUtils';
@@ -168,7 +164,7 @@ const App: React.FC = () => {
 
   const closeToast = () => setActiveToast(null);
 
-  const { investments, managedAssets, cachedApiData } = appData;
+  const { investments, managedAssets } = appData;
 
   useEffect(() => {
     setAppData(prev => ({
@@ -218,7 +214,7 @@ const App: React.FC = () => {
 
     const loadedCache = loadedAppData.cachedApiData || defaultCachedApiData;
     const initialRate = loadedCache.exchangeRate;
-    setUsdToAudRate(initialRate);
+    setUsdToAudRate(initialRate ?? null);
 
     const initialAssetPrices: Record<string, number | null> = {};
     let investmentsNeedUpdateFromCache = false;
@@ -229,7 +225,7 @@ const App: React.FC = () => {
         let audPrice: number | null = null;
         if (asset.type === InvestmentType.CRYPTO && loadedCache.cryptoPricesAUD && loadedCache.cryptoPricesAUD[asset.apiId] !== undefined) {
             audPrice = loadedCache.cryptoPricesAUD[asset.apiId];
-        } else if (asset.type === InvestmentType.EQUITY && loadedCache.equityPricesUSD && loadedCache.equityPricesUSD[asset.apiId] !== undefined && initialRate) {
+        } else if (asset.type === InvestmentType.EQUITY && loadedCache.equityPricesUSD && typeof loadedCache.equityPricesUSD[asset.apiId] === 'number' && initialRate) {
             audPrice = loadedCache.equityPricesUSD[asset.apiId] * initialRate;
         }
         if (audPrice !== null) {
@@ -267,64 +263,67 @@ const App: React.FC = () => {
   }, [appData, isInitialDataLoading, showToast]);
 
    useEffect(() => {
-    const fetchRateIfNeeded = async () => {
-        if (!isInitialDataLoading && usdToAudRate === null && !isFetchingRate) {
-            setIsFetchingRate(true);
-            try {
-                const rate = await getUsdToAudRate(); 
-                if (rate) {
-                    setUsdToAudRate(rate);
-                    setAppData(prev => ({ 
-                        ...prev,
-                        cachedApiData: {
-                            ...(prev.cachedApiData || defaultCachedApiData),
-                            exchangeRate: rate,
-                            syncTimestamps: {
-                                ...(prev.cachedApiData?.syncTimestamps || {}),
-                                exchangeRate: new Date().toISOString(),
-                            }
-                        }
-                    }));
-                    setAppData(prevAppData => { 
-                        const currentEquityPricesUSD = prevAppData.cachedApiData?.equityPricesUSD || {};
-                        const newAssetPricesAUDFromRateUpdate: Record<string, number | null> = { ...assetCurrentPricesAUD };
-                        let investmentsNeedUpdateAfterRateFetch = false;
-                        const updatedInvestmentsAfterRateFetch = [...prevAppData.investments].map(inv => ({...inv}));
-
-                        prevAppData.managedAssets.forEach(asset => {
-                            if (asset.type === InvestmentType.EQUITY && currentEquityPricesUSD[asset.apiId] !== undefined) {
-                                const newAudPrice = currentEquityPricesUSD[asset.apiId] * rate;
-                                newAssetPricesAUDFromRateUpdate[asset.id] = newAudPrice;
-                                
-                                updatedInvestmentsAfterRateFetch.forEach((inv, index) => {
-                                    if (inv.assetId === asset.id && !inv.endDate) {
-                                        if(inv.currentPricePerUnitAUD !== newAudPrice) {
-                                           updatedInvestmentsAfterRateFetch[index] = {...inv, currentPricePerUnitAUD: newAudPrice};
-                                           investmentsNeedUpdateAfterRateFetch = true;
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                        setAssetCurrentPricesAUD(newAssetPricesAUDFromRateUpdate);
-                        if(investmentsNeedUpdateAfterRateFetch){
-                            return {...prevAppData, investments: updatedInvestmentsAfterRateFetch};
-                        }
-                        return prevAppData; 
-                    });
-                    showToast('USD/AUD exchange rate updated.', 'success', 3000);
-                } else {
-                    showToast('Could not fetch USD/AUD exchange rate. USD prices may be inaccurate.', 'error');
-                }
-            } catch (error) {
-                showToast('Error fetching USD/AUD exchange rate.', 'error');
-            } finally {
-                setIsFetchingRate(false);
+    const fetchAndSetConsolidatedPrices = async () => {
+      if (!isInitialDataLoading && (usdToAudRate === null || Object.keys(assetCurrentPricesAUD).length === 0) && !isFetchingRate) {
+        setIsFetchingRate(true);
+        try {
+          const cryptoIds = managedAssets.filter((a: ManagedAsset) => a.type === InvestmentType.CRYPTO).map((a: ManagedAsset) => a.apiId);
+          const equityIds = managedAssets.filter((a: ManagedAsset) => a.type === InvestmentType.EQUITY).map((a: ManagedAsset) => a.apiId);
+          const { cryptoPricesAUD, equityPricesUSD, usdToAudRate: fetchedRate } = await fetchConsolidatedPrices(cryptoIds, equityIds);
+          setUsdToAudRate(fetchedRate);
+          // Build assetCurrentPricesAUD
+          const newAssetPrices: Record<string, number | null> = {};
+          managedAssets.forEach((asset: ManagedAsset) => {
+            if (asset.type === InvestmentType.CRYPTO && cryptoPricesAUD[asset.apiId]?.aud !== undefined) {
+              newAssetPrices[asset.id] = cryptoPricesAUD[asset.apiId].aud;
+            } else if (asset.type === InvestmentType.EQUITY && equityPricesUSD && typeof (equityPricesUSD as Record<string, number>)[asset.apiId] === 'number' && fetchedRate) {
+              newAssetPrices[asset.id] = (equityPricesUSD as Record<string, number>)[asset.apiId] * fetchedRate;
             }
+          });
+          setAssetCurrentPricesAUD(newAssetPrices);
+          setAppData((prev: AppData) => {
+            // Convert cryptoPricesAUD to Record<string, number>
+            const cryptoPricesAUDRecord: Record<string, number> = {};
+            Object.entries(cryptoPricesAUD).forEach(([apiId, value]) => {
+              if (value && typeof value.aud === 'number') {
+                cryptoPricesAUDRecord[apiId] = value.aud;
+              }
+            });
+            // equityPricesUSD is already Record<string, number> or compatible
+            const equityPricesUSDRecord: Record<string, number> = {};
+            if (equityPricesUSD && typeof equityPricesUSD === 'object') {
+              Object.entries(equityPricesUSD as Record<string, number>).forEach(([apiId, value]) => {
+                if (typeof value === 'number') {
+                  equityPricesUSDRecord[apiId] = value;
+                }
+              });
+            }
+            return {
+              ...prev,
+              cachedApiData: {
+                ...(prev.cachedApiData || defaultCachedApiData),
+                cryptoPricesAUD: cryptoPricesAUDRecord,
+                equityPricesUSD: equityPricesUSDRecord,
+                exchangeRate: fetchedRate,
+                syncTimestamps: {
+                  ...(prev.cachedApiData?.syncTimestamps || {}),
+                  exchangeRate: new Date().toISOString(),
+                  crypto: new Date().toISOString(),
+                  equities: new Date().toISOString(),
+                }
+              }
+            };
+          });
+          showToast('Prices and exchange rate updated.', 'success', 3000);
+        } catch (error) {
+          showToast('Could not fetch consolidated prices. Data may be outdated.', 'error');
+        } finally {
+          setIsFetchingRate(false);
         }
+      }
     };
-    fetchRateIfNeeded();
-  }, [isInitialDataLoading, usdToAudRate, showToast, isFetchingRate, assetCurrentPricesAUD]); 
+    fetchAndSetConsolidatedPrices();
+  }, [isInitialDataLoading, usdToAudRate, showToast, isFetchingRate, assetCurrentPricesAUD, managedAssets]); 
 
 
   const handleRestoreFromServer = async () => { 
@@ -353,7 +352,7 @@ const App: React.FC = () => {
 
             const loadedCache = restoredData.cachedApiData || defaultCachedApiData;
             const newRate = loadedCache.exchangeRate;
-            setUsdToAudRate(newRate);
+            setUsdToAudRate(newRate ?? null);
             
             const newAssetPrices: Record<string, number | null> = {};
             let investmentsNeedUpdateOnRestore = false;
@@ -363,7 +362,7 @@ const App: React.FC = () => {
                 let audPrice: number | null = null;
                 if (asset.type === InvestmentType.CRYPTO && loadedCache.cryptoPricesAUD && loadedCache.cryptoPricesAUD[asset.apiId] !== undefined) {
                     audPrice = loadedCache.cryptoPricesAUD[asset.apiId];
-                } else if (asset.type === InvestmentType.EQUITY && loadedCache.equityPricesUSD && loadedCache.equityPricesUSD[asset.apiId] !== undefined && newRate) {
+                } else if (asset.type === InvestmentType.EQUITY && loadedCache.equityPricesUSD && typeof loadedCache.equityPricesUSD[asset.apiId] === 'number' && newRate) {
                     audPrice = loadedCache.equityPricesUSD[asset.apiId] * newRate;
                 }
                 if (audPrice !== null) newAssetPrices[asset.id] = audPrice;
@@ -413,51 +412,20 @@ const App: React.FC = () => {
       setCurrentlyFetchingAssetApiIds(new Set());
       return;
     }
-
     const now = Date.now();
     if (now - lastPriceFetchAttemptTimestamp < 60000 && !isManualRefresh) {
-        setCurrentlyFetchingAssetApiIds(new Set());
-        return;
+      setCurrentlyFetchingAssetApiIds(new Set());
+      return;
     }
-     if (isManualRefresh && now - lastPriceFetchAttemptTimestamp < 5000) {
-        showToast("Manual refresh triggered too soon. Please wait.", 'info', 3000);
-        return;
+    if (isManualRefresh && now - lastPriceFetchAttemptTimestamp < 5000) {
+      showToast("Manual refresh triggered too soon. Please wait.", 'info', 3000);
+      return;
     }
-
-    let currentRate = usdToAudRate;
-    if (!currentRate && !isFetchingRate) { 
-        setIsFetchingRate(true);
-        try {
-            const fetchedRate = await getUsdToAudRate(); 
-            if (fetchedRate) {
-                setUsdToAudRate(fetchedRate);
-                currentRate = fetchedRate; 
-                setAppData(prev => ({
-                    ...prev,
-                    cachedApiData: {
-                        ...(prev.cachedApiData || defaultCachedApiData),
-                        exchangeRate: fetchedRate,
-                        syncTimestamps: {
-                            ...(prev.cachedApiData?.syncTimestamps || {}),
-                            exchangeRate: new Date().toISOString(),
-                        }
-                    }
-                }));
-            } else {
-                 showToast('Could not fetch USD/AUD exchange rate for refresh. Equity prices may not update to AUD.', 'error');
-            }
-        } catch (e) {
-            showToast('Error fetching USD/AUD exchange rate for refresh.', 'error');
-        } finally {
-            setIsFetchingRate(false);
-        }
-    }
-    
+    setLastPriceFetchAttemptTimestamp(Date.now());
     const cryptoAssetApiIdsToFetch: string[] = [];
     const equityAssetApiIdsToFetch: string[] = [];
     const allManagedApiIdsForSpinner: string[] = [];
-
-    appData.managedAssets.forEach(asset => {
+    appData.managedAssets.forEach((asset: ManagedAsset) => {
       allManagedApiIdsForSpinner.push(asset.apiId);
       if (asset.type === InvestmentType.CRYPTO && !cryptoAssetApiIdsToFetch.includes(asset.apiId)) {
         cryptoAssetApiIdsToFetch.push(asset.apiId);
@@ -465,96 +433,27 @@ const App: React.FC = () => {
         equityAssetApiIdsToFetch.push(asset.apiId);
       }
     });
-
     if (cryptoAssetApiIdsToFetch.length === 0 && equityAssetApiIdsToFetch.length === 0) {
-        setCurrentlyFetchingAssetApiIds(new Set());
-        return;
+      setCurrentlyFetchingAssetApiIds(new Set());
+      return;
     }
-
-    setLastPriceFetchAttemptTimestamp(Date.now());
     setCurrentlyFetchingAssetApiIds(new Set(allManagedApiIdsForSpinner));
-
-    let newPricesAppliedToInvestments = false;
-    let updatedInvestmentsList = appData.investments.map(inv => ({...inv}));
-    const newLiveAssetPricesAUD: Record<string, number | null> = { ...assetCurrentPricesAUD }; 
-    const newCachedCryptoAUD: Record<string, number> = { ...(appData.cachedApiData?.cryptoPricesAUD || {}) };
-    const newCachedEquityUSD: Record<string, number> = { ...(appData.cachedApiData?.equityPricesUSD || {}) };
-    let cryptoFetchError = false;
-    let equityFetchError = false;
-    let newCryptoTimestamp: string | undefined;
-    let newEquityTimestamp: string | undefined;
-
     try {
-      if (cryptoAssetApiIdsToFetch.length > 0) {
-        try {
-            const cryptoPrices: CryptoPriceResponse = await fetchCryptoPrices(cryptoAssetApiIdsToFetch);
-            cryptoAssetApiIdsToFetch.forEach(apiId => { 
-                if (cryptoPrices[apiId]?.aud !== undefined) {
-                    const audPrice = cryptoPrices[apiId].aud;
-                    newCachedCryptoAUD[apiId] = audPrice; 
-                    const managedAsset = appData.managedAssets.find(ma => ma.apiId === apiId && ma.type === InvestmentType.CRYPTO);
-                    if (managedAsset) newLiveAssetPricesAUD[managedAsset.id] = audPrice;
-                }
-            });
-            if (Object.keys(cryptoPrices).length > 0) newCryptoTimestamp = new Date().toISOString();
-        } catch (error) { cryptoFetchError = true; }
-      }
-
-      if (equityAssetApiIdsToFetch.length > 0) {
-        if (!currentRate) {
-            equityFetchError = true;
-        } else {
-            try {
-                const rawEquityPricesResponse = await fetchEquityPrices(equityAssetApiIdsToFetch);
-                const tempPriceMapUSD: { [apiId: string]: number } = {};
-                let isApiError = false;
-
-                if (rawEquityPricesResponse && typeof rawEquityPricesResponse === 'object' && 'code' in rawEquityPricesResponse && 'message' in rawEquityPricesResponse) {
-                  const errorResponse = rawEquityPricesResponse as EquityErrorResponse;
-                  if (errorResponse.code !== 200 && errorResponse.code !== undefined) isApiError = true;
-                }
-
-                if (!isApiError && rawEquityPricesResponse && typeof rawEquityPricesResponse === 'object') {
-                  for (const symbol of equityAssetApiIdsToFetch) {
-                    if ((rawEquityPricesResponse as EquityPriceMap)[symbol]?.price) {
-                      const priceStr = (rawEquityPricesResponse as EquityPriceMap)[symbol].price;
-                      const priceNum = parseFloat(priceStr);
-                      if (!isNaN(priceNum)) tempPriceMapUSD[symbol] = priceNum;
-                    }
-                  }
-                   if (Object.keys(tempPriceMapUSD).length === 0 && 'symbol' in rawEquityPricesResponse && (rawEquityPricesResponse as EquitySingleSymbolResponse).symbol?.price) { 
-                    const singleResponse = rawEquityPricesResponse as EquitySingleSymbolResponse;
-                    const priceStr = singleResponse.symbol.price;
-                    const priceNum = parseFloat(priceStr);
-                    if (!isNaN(priceNum)) {
-                      let symbolKey = singleResponse.meta?.symbol || (equityAssetApiIdsToFetch.length === 1 ? equityAssetApiIdsToFetch[0] : '');
-                      if (symbolKey) tempPriceMapUSD[symbolKey] = priceNum;
-                    }
-                  }
-                }
-                
-                if (Object.keys(tempPriceMapUSD).length > 0) {
-                    equityAssetApiIdsToFetch.forEach(apiId => { 
-                        if (tempPriceMapUSD[apiId] !== undefined) {
-                            const usdPrice = tempPriceMapUSD[apiId];
-                            newCachedEquityUSD[apiId] = usdPrice; 
-                            const audPrice = usdPrice * currentRate!;
-                            const managedAsset = appData.managedAssets.find(ma => ma.apiId === apiId && ma.type === InvestmentType.EQUITY);
-                            if (managedAsset) newLiveAssetPricesAUD[managedAsset.id] = audPrice;
-                        }
-                    });
-                    newEquityTimestamp = new Date().toISOString();
-                } else if (!isApiError && equityAssetApiIdsToFetch.length > 0) {
-                  equityFetchError = true; 
-                } else if (isApiError) { equityFetchError = true; }
-            } catch (error) { equityFetchError = true; }
+      const { cryptoPricesAUD, equityPricesUSD, usdToAudRate: fetchedRate } = await fetchConsolidatedPrices(cryptoAssetApiIdsToFetch, equityAssetApiIdsToFetch);
+      setUsdToAudRate(fetchedRate);
+      const newLiveAssetPricesAUD: Record<string, number | null> = { ...assetCurrentPricesAUD };
+      // cryptoPricesAUD is { [apiId: string]: { aud: number } }
+      appData.managedAssets.forEach((asset: ManagedAsset) => {
+        if (asset.type === InvestmentType.CRYPTO && cryptoPricesAUD[asset.apiId]?.aud !== undefined) {
+          newLiveAssetPricesAUD[asset.id] = cryptoPricesAUD[asset.apiId].aud;
+        } else if (asset.type === InvestmentType.EQUITY && equityPricesUSD && typeof (equityPricesUSD as Record<string, number>)[asset.apiId] === 'number' && fetchedRate) {
+          newLiveAssetPricesAUD[asset.id] = (equityPricesUSD as Record<string, number>)[asset.apiId] * fetchedRate;
         }
-      }
-      
-      setAssetCurrentPricesAUD(newLiveAssetPricesAUD); 
-
-      updatedInvestmentsList = updatedInvestmentsList.map(inv => {
-        if (!inv.endDate) { 
+      });
+      setAssetCurrentPricesAUD(newLiveAssetPricesAUD);
+      let newPricesAppliedToInvestments = false;
+      let updatedInvestmentsList = appData.investments.map((inv: Investment) => {
+        if (!inv.endDate) {
           const latestAssetPriceAUD = newLiveAssetPricesAUD[inv.assetId];
           if (latestAssetPriceAUD !== undefined && latestAssetPriceAUD !== null) {
             if (inv.currentPricePerUnitAUD !== latestAssetPriceAUD) {
@@ -565,36 +464,47 @@ const App: React.FC = () => {
         }
         return inv;
       });
-
-    } catch (error) { 
-      showToast("An unexpected error occurred during price refresh.", 'error');
-    } finally {
-      setAppData(prev => {
-        const newTimestamps = { ...(prev.cachedApiData?.syncTimestamps || {}) };
-        if (newCryptoTimestamp) newTimestamps.crypto = newCryptoTimestamp;
-        if (newEquityTimestamp) newTimestamps.equities = newEquityTimestamp;
-
+      setAppData((prev: AppData) => {
+        // Convert cryptoPricesAUD to Record<string, number>
+        const cryptoPricesAUDRecord: Record<string, number> = {};
+        Object.entries(cryptoPricesAUD).forEach(([apiId, value]) => {
+          if (value && typeof value.aud === 'number') {
+            cryptoPricesAUDRecord[apiId] = value.aud;
+          }
+        });
+        // equityPricesUSD is already Record<string, number> or compatible
+        const equityPricesUSDRecord: Record<string, number> = {};
+        if (equityPricesUSD && typeof equityPricesUSD === 'object') {
+          Object.entries(equityPricesUSD as Record<string, number>).forEach(([apiId, value]) => {
+            if (typeof value === 'number') {
+              equityPricesUSDRecord[apiId] = value;
+            }
+          });
+        }
         return {
           ...prev,
           investments: newPricesAppliedToInvestments ? updatedInvestmentsList : prev.investments,
           cachedApiData: {
             ...(prev.cachedApiData || defaultCachedApiData),
-            cryptoPricesAUD: newCachedCryptoAUD,
-            equityPricesUSD: newCachedEquityUSD,
-            syncTimestamps: newTimestamps,
+            cryptoPricesAUD: cryptoPricesAUDRecord,
+            equityPricesUSD: equityPricesUSDRecord,
+            exchangeRate: fetchedRate,
+            syncTimestamps: {
+              ...(prev.cachedApiData?.syncTimestamps || {}),
+              exchangeRate: new Date().toISOString(),
+              crypto: new Date().toISOString(),
+              equities: new Date().toISOString(),
+            }
           }
         };
       });
-      setCurrentlyFetchingAssetApiIds(new Set()); 
-      if (cryptoFetchError && equityFetchError) {
-        showToast("Failed to fetch prices for Crypto & Equities (or rate).", 'error');
-      } else if (cryptoFetchError) {
-        showToast("Failed to fetch cryptocurrency prices.", 'error');
-      } else if (equityFetchError) {
-        showToast("Failed to fetch equity prices or apply AUD rate.", 'error');
-      }
+      setCurrentlyFetchingAssetApiIds(new Set());
+      showToast('Prices and exchange rate updated.', 'success', 3000);
+    } catch (error) {
+      setCurrentlyFetchingAssetApiIds(new Set());
+      showToast('Failed to fetch consolidated prices.', 'error');
     }
-  }, [appData.investments, appData.managedAssets, isInitialDataLoading, lastPriceFetchAttemptTimestamp, autoRefreshConfig.enabled, showToast, usdToAudRate, assetCurrentPricesAUD, isFetchingRate, appData.cachedApiData]);
+  }, [appData.investments, appData.managedAssets, isInitialDataLoading, lastPriceFetchAttemptTimestamp, autoRefreshConfig.enabled, showToast, assetCurrentPricesAUD, appData.cachedApiData]);
 
 
   useEffect(() => {
@@ -1152,7 +1062,7 @@ const App: React.FC = () => {
 
             const loadedCache = validatedImportData.cachedApiData || defaultCachedApiData;
             const importedRate = loadedCache.exchangeRate;
-            setUsdToAudRate(importedRate);
+            setUsdToAudRate(importedRate ?? null);
             
             const importedAssetPrices: Record<string, number | null> = {};
             let investmentsNeedUpdateOnImport = false;
@@ -1162,7 +1072,7 @@ const App: React.FC = () => {
                 let audPrice: number | null = null;
                 if (asset.type === InvestmentType.CRYPTO && loadedCache.cryptoPricesAUD && loadedCache.cryptoPricesAUD[asset.apiId] !== undefined) {
                     audPrice = loadedCache.cryptoPricesAUD[asset.apiId];
-                } else if (asset.type === InvestmentType.EQUITY && loadedCache.equityPricesUSD && loadedCache.equityPricesUSD[asset.apiId] !== undefined && importedRate) {
+                } else if (asset.type === InvestmentType.EQUITY && loadedCache.equityPricesUSD && typeof loadedCache.equityPricesUSD[asset.apiId] === 'number' && importedRate) {
                     audPrice = loadedCache.equityPricesUSD[asset.apiId] * importedRate;
                 }
                 if (audPrice !== null) importedAssetPrices[asset.id] = audPrice;
