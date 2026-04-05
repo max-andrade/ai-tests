@@ -1,6 +1,0 @@
-{
-  "name": "Investment Tracker",
-  "description": "A web application to track cryptocurrency and US-based equity investments, displaying details such as invested amount, profit/loss, and investment period.",
-  "requestFramePermissions": [],
-  "prompt": ""
-}
