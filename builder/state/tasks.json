@@ -1,0 +1,26 @@
+{
+  "tasks": [
+    {
+      "id": "C0-BOOTSTRAP-001",
+      "title": "Create repo-native CIAO builder system",
+      "role": "Planner / Architect",
+      "status": "completed",
+      "verification": [
+        "./builder/scripts/verify_builder.sh"
+      ],
+      "artifacts": [
+        "builder/README.md",
+        "builder/docs/OPERATING_MODEL.md",
+        "builder/state/system_state.json"
+      ]
+    },
+    {
+      "id": "C1-DESIGN-001",
+      "title": "Define CIAO POC architecture baseline",
+      "role": "Planner / Architect",
+      "status": "pending",
+      "verification": [],
+      "artifacts": []
+    }
+  ]
+}

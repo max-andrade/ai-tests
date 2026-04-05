@@ -1,0 +1,22 @@
+{
+  "currentStage": 0,
+  "stageName": "Builder bootstrap",
+  "status": "in_progress",
+  "nextStageTrigger": "builder_verification_passed",
+  "lanes": [],
+  "artifacts": [
+    "builder/README.md",
+    "builder/docs/OPERATING_MODEL.md",
+    "builder/templates/LANE_TASK_TEMPLATE.md",
+    "builder/templates/STAGE_REVIEW_TEMPLATE.md"
+  ],
+  "openQuestions": [
+    "Which CIAO POC vertical slice should be implemented first?",
+    "What are the top 3 must-have demo flows?"
+  ],
+  "risks": [
+    "Undefined acceptance criteria can cause parallel lane conflicts",
+    "Insufficient tests may block deterministic completion"
+  ],
+  "updatedAtUtc": "2026-04-05T00:00:00Z"
+}
